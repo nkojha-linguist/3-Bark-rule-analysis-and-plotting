@@ -1,0 +1,248 @@
+# ============================================================
+# 3-BARK ANALYSIS: LME, EMMeans, and Pairwise Contrasts for the Brajbhasha Vowel System
+# Based on Syrdal & Gopal (1986) 3-Bark Hypothesis
+# ============================================================
+
+# --- 0. Load required packages ---
+library(readxl)
+library(openxlsx)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(ggplot2)
+library(ggrepel) # For non-overlapping labels
+
+# --- 1. Import Bark data ---
+data_path  <- "D:\\SuppPub1.xlsx"
+sheet_name <- "For 3-Bark Analysis"
+
+df <- read_excel(data_path, sheet = sheet_name)
+
+# --- 2. Prepare data ---
+df$Vowel <- factor(df$Vowel,
+                   levels = c("i", "e", "ɛ", "ɪ", "ɐ", "ɑ", "ɔ", "o", "ʊ", "u"))
+df$Subject <- factor(df$Subject)
+
+# Check for missing values
+colSums(is.na(df[, c("Vowel", "F1-F0", "F3-F2", "Subject")]))
+
+# --- 3. 3-Bark classification (descriptive) ---
+df <- df %>%
+  mutate(
+    F1F0_class = ifelse(`F1-F0` < 3, "High (<3 Bark)", "Non-high (>3 Bark)"),
+    F3F2_class = ifelse(`F3-F2` < 3, "Front (<3 Bark)", "Back (>3 Bark)"),
+    Cell = paste0(
+      ifelse(`F1-F0` < 3, "High", "Non-high"), "-",
+      ifelse(`F3-F2` < 3, "Front", "Back")
+    )
+  )
+
+# ============================================================
+# 4. LME MODELS
+# ============================================================
+model_f1f0 <- lmer(`F1-F0` ~ Vowel + (1 | Subject), data = df, REML = TRUE)
+model_f3f2 <- lmer(`F3-F2` ~ Vowel + (1 | Subject), data = df, REML = TRUE)
+
+summary(model_f1f0)
+anova(model_f1f0)
+summary(model_f3f2)
+anova(model_f3f2)
+
+# ============================================================
+# 5. EMMEANS
+# ============================================================
+emm_f1f0 <- emmeans(model_f1f0, ~ Vowel)
+emm_f3f2 <- emmeans(model_f3f2, ~ Vowel)
+
+emm_f1f0_df <- as.data.frame(emm_f1f0) %>%
+  mutate(`3-Bark Classification` = ifelse(emmean < 3, "High (<3 Bark)", "Non-high (>3 Bark)"))
+
+emm_f3f2_df <- as.data.frame(emm_f3f2) %>%
+  mutate(`3-Bark Classification` = ifelse(emmean < 3, "Front (<3 Bark)", "Back (>3 Bark)"))
+
+print(emm_f1f0_df)
+print(emm_f3f2_df)
+
+# ============================================================
+# 6. PAIRWISE CONTRASTS
+# ============================================================
+pairwise_f1f0 <- pairs(emm_f1f0, adjust = "tukey")
+pairwise_f3f2 <- pairs(emm_f3f2, adjust = "tukey")
+
+pairwise_f1f0_df <- as.data.frame(pairwise_f1f0) %>%
+  mutate(Significance = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01  ~ "**",
+    p.value < 0.05  ~ "*",
+    p.value < 0.10  ~ ".",
+    TRUE            ~ "ns"
+  ))
+
+pairwise_f3f2_df <- as.data.frame(pairwise_f3f2) %>%
+  mutate(Significance = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01  ~ "**",
+    p.value < 0.05  ~ "*",
+    p.value < 0.10  ~ ".",
+    TRUE            ~ "ns"
+  ))
+
+print(pairwise_f1f0_df)
+print(pairwise_f3f2_df)
+
+# ============================================================
+# 7. SUMMARY TABLE: 3-BARK CLASSIFICATION
+# ============================================================
+summary_3bark <- emm_f1f0_df %>%
+  select(Vowel, F1F0_emmean = emmean, F1F0_SE = SE, F1F0_class = `3-Bark Classification`) %>%
+  left_join(
+    emm_f3f2_df %>%
+      select(Vowel, F3F2_emmean = emmean, F3F2_SE = SE, F3F2_class = `3-Bark Classification`),
+    by = "Vowel"
+  ) %>%
+  mutate(`Combined Classification` = paste0(F1F0_class, " / ", F3F2_class))
+
+print(summary_3bark)
+
+# ============================================================
+# 8. VOWEL PAIRS SHARING THE SAME 3-BARK CELL
+# ============================================================
+same_cell_summary <- summary_3bark %>%
+  mutate(Cell = paste0(
+    ifelse(grepl("^High", F1F0_class), "High", "Non-high"), "-",
+    ifelse(grepl("^Front", F3F2_class), "Front", "Back")
+  )) %>%
+  group_by(Cell) %>%
+  summarise(Vowels = paste(Vowel, collapse = ", "), .groups = "drop")
+
+print(same_cell_summary)
+
+# ============================================================
+# 9. IMPROVED 3-BARK PLOT (SINGLE FIGURE)
+# X-axis = F3-F2 (frontness/backness)
+# Y-axis = F1-F0 (highness/lowness)
+# ============================================================
+
+# --- 9a. Prepare centroid data with cell information ---
+centroids <- summary_3bark %>%
+  mutate(
+    Cell = paste0(
+      ifelse(grepl("^High", F1F0_class), "High", "Non-high"), "-",
+      ifelse(grepl("^Front", F3F2_class), "Front", "Back")
+    )
+  )
+
+# --- 9b. Define contrastive colors for the four 3-Bark cells ---
+cell_colors <- c(
+  "High-Front"     = "#1B9E77",  # teal green
+  "High-Back"      = "#D95F02",  # orange
+  "Non-high-Front" = "#7570B3",  # purple
+  "Non-high-Back"  = "#E7298A"   # magenta
+)
+
+# --- 9c. Build the plot (axes swapped: X = F3-F2, Y = F1-F0) ---
+p_3bark <- ggplot() +
+  # Shaded quadrants (3-Bark cells) -- positions rotated for swapped axes
+  # Bottom-left: High-Front      (F3-F2 < 3, F1-F0 < 3)
+  annotate("rect", xmin = -Inf, xmax = 3, ymin = -Inf, ymax = 3,
+           alpha = 0.08, fill = cell_colors["High-Front"]) +
+  # Top-left: Non-high-Front     (F3-F2 < 3, F1-F0 > 3)
+  annotate("rect", xmin = -Inf, xmax = 3, ymin = 3, ymax = Inf,
+           alpha = 0.08, fill = cell_colors["Non-high-Front"]) +
+  # Bottom-right: High-Back      (F3-F2 > 3, F1-F0 < 3)
+  annotate("rect", xmin = 3, xmax = Inf, ymin = -Inf, ymax = 3,
+           alpha = 0.08, fill = cell_colors["High-Back"]) +
+  # Top-right: Non-high-Back     (F3-F2 > 3, F1-F0 > 3)
+  annotate("rect", xmin = 3, xmax = Inf, ymin = 3, ymax = Inf,
+           alpha = 0.08, fill = cell_colors["Non-high-Back"]) +
+  # Individual tokens (colored by 3-Bark cell)
+  geom_point(data = df,
+             aes(x = `F3-F2`, y = `F1-F0`, color = Cell),
+             alpha = 0.25, size = 2.5) +
+  # 3-Bark critical distance lines
+  geom_hline(yintercept = 3, linetype = "dashed", color = "black", linewidth = 0.8) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "black", linewidth = 0.8) +
+  # Mean vowel centroids (larger, filled, with black outline)
+  geom_point(data = centroids,
+             aes(x = F3F2_emmean, y = F1F0_emmean, fill = Cell),
+             shape = 21, size = 8, color = "black", stroke = 0.8) +
+  # Vowel labels on centroids
+  geom_text_repel(data = centroids,
+                  aes(x = F3F2_emmean, y = F1F0_emmean, label = Vowel),
+                  size = 8, fontface = "bold", color = "black",
+                  box.padding = 0.5, point.padding = 0.3,
+                  segment.color = "grey40", segment.size = 0.3,
+                  min.segment.length = 0) +
+  # Quadrant annotations (updated positions after swap)
+  annotate("text", x = 1.5, y = 1.2, label = "High-Front",
+           size = 6, fontface = "italic", color = cell_colors["High-Front"]) +
+  annotate("text", x = 1.5, y = 6.5, label = "Non-high-Front",
+           size = 6, fontface = "italic", color = cell_colors["Non-high-Front"]) +
+  annotate("text", x = 7.0, y = 1.2, label = "High-Back",
+           size = 6, fontface = "italic", color = cell_colors["High-Back"]) +
+  annotate("text", x = 7.0, y = 6.5, label = "Non-high-Back",
+           size = 6, fontface = "italic", color = cell_colors["Non-high-Back"]) +
+  # Scales and labels
+  scale_color_manual(values = cell_colors, name = "3-Bark Cell") +
+  scale_fill_manual(values = cell_colors, name = "3-Bark Cell") +
+  labs(
+    x = expression(bold("F3 \u2212 F2 (Bark)") ~ " \u2192  [more back / retracted]"),
+    y = expression(bold("F1 \u2212 F0 (Bark)") ~ " \u2192  [lower tongue height / more open]"),
+    title = paste("Brajbhasha Vowels in 3-Bark Perceptual Space"),
+    subtitle = paste("Dashed lines = 3-Bark critical distance (Syrdal & Gopal, 1986)")
+  ) +
+  scale_y_reverse(limits = c(6.5, 0.5)) +
+  scale_x_continuous(limits = c(0, 9)) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 10, color = "grey40", hjust = 0),
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, margin = margin(r = 10)),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_3bark)
+
+# Save the plot
+ggsave("3Bark_Space_Brajbhasha.png", p_3bark,
+       width = 9, height = 5.5, dpi = 600, bg = "white")
+
+# ============================================================
+# 10. EXPORT ALL TABLES TO A SINGLE XLSX FILE (MULTI-SHEET)
+# ============================================================
+
+# Create a named list of data frames (each becomes one sheet)
+tables_list <- list(
+  "EMMeans_F1F0"        = emm_f1f0_df,
+  "EMMeans_F3F2"        = emm_f3f2_df,
+  "Pairwise_F1F0"       = pairwise_f1f0_df,
+  "Pairwise_F3F2"       = pairwise_f3f2_df,
+  "Summary_3Bark"       = summary_3bark,
+  "Same_Cell_Pairs"     = same_cell_summary
+)
+
+# Write to a single Excel file with one sheet per table
+output_xlsx <- "3Bark_Analysis_Brajbhasha.xlsx"
+
+wb <- createWorkbook()
+for (sheet in names(tables_list)) {
+  addWorksheet(wb, sheet)
+  writeData(wb, sheet, tables_list[[sheet]])
+  # Optional: freeze the top row and auto-adjust column widths
+  freezePane(wb, sheet, firstRow = TRUE)
+  setColWidths(wb, sheet, cols = 1:ncol(tables_list[[sheet]]),
+               widths = "auto")
+}
+saveWorkbook(wb, output_xlsx, overwrite = TRUE)
+
+cat("\n========================================\n")
+cat("ANALYSIS COMPLETE\n")
+cat("Output Excel file:", output_xlsx, "\n")
+cat("Output plot file : 3Bark_Space_Brajbhasha.png\n")
+cat("========================================\n")
